@@ -28,6 +28,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -39,6 +40,61 @@ for _sub in ('lifter', 'extract'):
         sys.path.insert(0, str(_path))
 
 import gen  # noqa: E402  (tools/lifter/gen.py)
+
+# GitHub #86: zig could sit idle for good on some Windows PCs and the log showed nothing past the lifting. Every step
+# is now logged with a timestamp and flushed at once, each compiler command is written before it runs, the final link
+# runs with -v into the log, and a stuck compiler ends in an error instead of a build that never finishes.
+COMPILE_TIMEOUT = 20 * 60  # one chunk (they take seconds)
+LINK_TIMEOUT = 45 * 60     # the library (minutes on a slow PC, including zig's one-time C runtime build)
+_log_lock = threading.Lock()
+_log_start = time.time()
+
+
+def note(log, text):
+    with _log_lock:
+        log.write(f'[{time.strftime("%H:%M:%S")} +{time.time() - _log_start:.0f}s] {text}\n')
+        log.flush()
+
+
+def quoted(command):
+    return ' '.join(f'"{part}"' if ' ' in str(part) else str(part) for part in command)
+
+
+def run_tool(command, env, log, what, timeout, stream=False):
+    """Run the compiler. stream: its output goes straight into the log (visible while it runs)."""
+    note(log, f'{what}: {quoted(command)}')
+    started = time.time()
+    try:
+        if stream:
+            with _log_lock:
+                log.flush()
+                result = subprocess.run(command, text=True, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                        timeout=timeout, stdin=subprocess.DEVNULL)
+        else:
+            result = subprocess.run(command, text=True, capture_output=True, env=env, timeout=timeout,
+                                    stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        note(log, f'{what}: no result after {timeout // 60} minutes: stopped (the compiler hung)')
+        raise SystemExit(f'gamebuild: {what} hung for {timeout // 60} minutes; see the log')
+    note(log, f'{what}: exit {result.returncode} after {time.time() - started:.1f}s')
+    return result
+
+
+def describe_compiler(resources, link, log):
+    """The compiler's version and settings (its cache folder above all) at the top of the log."""
+    compiler = resources / link['compiler']
+    env = compiler_env(resources, link)
+    note(log, f'platform {sys.platform}, {os.cpu_count()} CPUs, compiler {compiler}')
+    note(log, f'ZIG_LIB_DIR={(env or {}).get("ZIG_LIB_DIR", "(unset)")} '
+              f'ZIG_GLOBAL_CACHE_DIR={os.environ.get("ZIG_GLOBAL_CACHE_DIR", "(default)")}')
+    for args in (['version'], ['env']):
+        try:
+            result = run_tool([str(compiler)] + args, env, log, f'zig {args[0]}', 120)
+            with _log_lock:
+                log.write((result.stdout or '') + (result.stderr or ''))
+                log.flush()
+        except SystemExit:
+            pass  # (already logged; the build itself decides)
 
 def default_data_root():
     override = os.environ.get('LARECOMP_DATA_ROOT') or os.environ.get('MONADO_DATA_ROOT')
@@ -176,7 +232,7 @@ def compile_units(resources, out, link, jobs, log):
             return key, signature, target
         command = ([str(compiler)] + list(link.get('compile', ['cc'])) + list(link.get('guest_flags', [])) +
                    [f'-I{item}' for item in include] + ['-c', str(source), '-o', str(target)])
-        result = subprocess.run(command, text=True, capture_output=True, env=compiler_env(resources, link))
+        result = run_tool(command, compiler_env(resources, link), log, f'compile {key}', COMPILE_TIMEOUT)
         if result.returncode != 0:
             failures.append(f'{key}:\n{result.stdout}{result.stderr}')
         done[0] += 1
@@ -200,7 +256,7 @@ def link_library(resources, out, link, units, log):
         f'-I{resources / item}' for item in link.get('include', ['include'])] + [
         '-DGAMELIB_ID="{}"'.format((resources / 'gamelib-id.txt').read_text(encoding='utf-8').strip()),
         '-c', str(resources / 'entry/gamelib_entry.c'), '-o', str(entry)]
-    result = subprocess.run(command, text=True, capture_output=True, env=compiler_env(resources, link))
+    result = run_tool(command, compiler_env(resources, link), log, 'compile the entry point', COMPILE_TIMEOUT)
     if result.returncode != 0:
         log.write(result.stdout + result.stderr)
         log.flush()
@@ -208,11 +264,9 @@ def link_library(resources, out, link, units, log):
     library = out / os.path.basename(link['library'])
     command = ([str(compiler)] + list(link.get('link', ['cc', '-shared'])) + [str(entry)] +
                [str(target) for _, _, target in units] +
-               [str(resources / extra) for extra in link.get('link_files', [])] + ['-o', str(library)])
-    result = subprocess.run(command, text=True, capture_output=True, env=compiler_env(resources, link))
+               [str(resources / extra) for extra in link.get('link_files', [])] + ['-v', '-o', str(library)])
+    result = run_tool(command, compiler_env(resources, link), log, 'link', LINK_TIMEOUT, stream=True)
     if result.returncode != 0:
-        log.write(result.stdout + result.stderr)
-        log.flush()
         raise SystemExit('gamebuild: linking the game code library failed')
     # What the runtime reads before loading it (runtime/gamelib.c), and the launcher's own record.
     library.with_name(library.name + '.id').write_text(
@@ -257,10 +311,15 @@ def main(argv=None):
     with (out / 'gamebuild.log').open('w', encoding='utf-8', errors='replace') as log:
         log.write(f'gamebuild: {dump} -> {out}\n')
         log.flush()
+        describe_compiler(resources, link, log)
+        note(log, 'generate: start')
         modules = generate_modules(dump, resources, out, jobs, log)
+        note(log, f'generate: done; compile: start ({jobs} at a time)')
         units = compile_units(resources, out, link, jobs, log)
+        note(log, 'compile: done; link: start')
         report(out, 'link', 0, 1, 'Linking')
         link_library(resources, out, link, units, log)
+        note(log, 'link: done')
         stamp.write_text(json.dumps({
             'fingerprint': current,
             'gamelib_id': (resources / 'gamelib-id.txt').read_text(encoding='utf-8').strip(),
