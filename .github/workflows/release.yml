@@ -5,6 +5,7 @@
 #
 # Run it by hand (Actions > release > Run workflow) for test packages, or push a tag v* for a DRAFT GitHub release with
 # both packages attached: review it on the Releases page and publish it yourself.
+# Manual run + a tag name in the "tag" box = a DRAFT release is created too.
 #
 # Upscalers: FSR 1 always; FSR 3 (Linux: native component built from AMD's SDK source; Windows: AMD's signed DLL from
 # the official FidelityFX SDK 1.1.4 release); DLSS on Windows (NVIDIA's official Streamline release,
@@ -16,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Draft release tag (e.g. v0.0.0-test)'
+        description: 'Draft release tag (e.g. v0.0.0-test). Leave empty to only build packages.'
         required: false
         type: string
   push:
@@ -170,7 +171,7 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-    draft-release:
+  draft-release:
     if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
     needs: [linux, windows]
     runs-on: ubuntu-24.04
