@@ -27,8 +27,14 @@ GAMES = ('profile.json', 'patches.py', 'hle_symbols.txt')
 # `zig cc` is all the guest code ever uses.
 ZIG_DROP = ('docs', 'compiler', 'build-web', 'fuzzer.zig', 'lldb', 'libcxx', 'libcxxabi', 'libtsan')
 LIBC_DROP = ('wasi', 'darwin', 'freebsd', 'netbsd', 'openbsd')
-LIBC_HEADERS = {'linux': ('any-linux-any', 'generic-glibc', 'x86_64-linux-gnu'),
+# zig 0.17 keeps x86-64's glibc headers (bits/wordsize.h ...) in x86-linux-gnu / x86-linux-any; there is no
+# x86_64-linux-gnu folder any more. Without them every guest file failed to compile on systems without their own
+# development headers (SteamOS): a native zig target falls back to /usr/include, which hid the problem elsewhere.
+LIBC_HEADERS = {'linux': ('any-linux-any', 'generic-glibc', 'x86-linux-any', 'x86-linux-gnu', 'x86_64-linux-gnu'),
                 'windows': ('any-windows-any',)}
+# An explicit target: the bundled headers and libraries, never the player's system ones (and the same objects on
+# every PC; the CPU level comes from GUEST_FLAGS' -march).
+TARGET = {'linux': 'x86_64-linux-gnu', 'windows': 'x86_64-windows-gnu'}
 
 
 def find_zig():
@@ -99,10 +105,10 @@ def stage(dest, platform, zig=None, link_files=()):
         'lib_dir': 'compiler/lib',
         # Guest translation units are plain C; the library only needs libc and the
         # runtime's exported symbols (resolved from the process that loads it).
-        'compile': ['cc'] + ([] if platform == 'windows' else ['-fPIC']),
+        'compile': ['cc', '-target', TARGET[platform]] + ([] if platform == 'windows' else ['-fPIC']),
         'guest_flags': list(game_id.GUEST_FLAGS),
         'include': ['include'],
-        'link': ['cc', '-shared'] + ([] if platform == 'windows' else ['-fPIC']),
+        'link': ['cc', '-target', TARGET[platform], '-shared'] + ([] if platform == 'windows' else ['-fPIC']),
         'library': 'lasgame.dll' if platform == 'windows' else 'lasgame.so',
         # e.g. the import library of the executable on Windows. It is produced while the
         # executable is linked, after this staging step, so only the packager checks it.

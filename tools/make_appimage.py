@@ -23,9 +23,14 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-# Host ABI / graphics driver components must not be replaced by packaged copies.
+# Host ABI / graphics driver components must not be replaced by packaged copies. That includes what the GPU drivers
+# themselves link against: AppRun puts usr/lib first on LD_LIBRARY_PATH, so a bundled copy older than the host's (the
+# CI builds on Ubuntu 24.04) is what Mesa gets too. RADV then failed to load (libxcb-dri3: undefined symbol
+# xcb_dri3_import_syncobj_checked) and the launcher found no GPU on SteamOS and other current distributions.
 HOST = re.compile(r"^(ld-linux|lib(c|m|pthread|dl|rt|resolv|util|anl)\.so|libnss_|libvulkan\.so|"
-                  r"lib(GL|EGL|GLX|OpenGL|GLdispatch|drm|gbm)[_.])")
+                  r"lib(GL|EGL|GLX|OpenGL|GLdispatch|drm|gbm)[_.]|"
+                  r"lib(stdc\+\+|gcc_s|z|expat|ffi|lzma|zstd|elf|udev|xshmfence)\.so|"
+                  r"lib(X11|X11-xcb|Xau|Xdmcp|Xext|Xfixes|Xrender|Xxf86vm|xcb|xcb-[a-z0-9]+|wayland-[a-z]+)\.so)")
 
 
 def dependencies(binary):
