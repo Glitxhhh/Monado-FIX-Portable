@@ -26,6 +26,7 @@ import os
 import re
 import runpy
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -68,9 +69,28 @@ class Progress:
             pass
 
 
+def ssl_context():
+    """A TLS context that also works where the frozen build's OpenSSL finds no trust store.
+
+    The packaged tool carries the build runner's OpenSSL (Ubuntu), compiled with
+    OPENSSLDIR=/usr/lib/ssl. Arch and SteamOS keep their bundle in /etc/ssl and Fedora in
+    /etc/pki/tls, so create_default_context() can end up with an empty store there and every
+    download fails with 'certificate verify failed: unable to get local issuer certificate'.
+    """
+    context = ssl.create_default_context()
+    if context.cert_store_stats().get('x509_ca', 0):
+        return context
+    for bundle in ('/etc/ssl/certs/ca-certificates.crt', '/etc/pki/tls/certs/ca-bundle.crt',
+                   '/etc/ssl/cert.pem', '/etc/ssl/certs/ca-bundle.crt', '/etc/ssl/ca-bundle.pem'):
+        if os.path.isfile(bundle):
+            context.load_verify_locations(bundle)
+            break
+    return context
+
+
 def download(rel, dest, sha256=None):
     request = urllib.request.Request(SDK_RAW + rel, headers={'User-Agent': 'Monado-FSR4-Prepare'})
-    with urllib.request.urlopen(request, timeout=120) as response, open(dest, 'wb') as out:
+    with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response, open(dest, 'wb') as out:
         shutil.copyfileobj(response, out, 1 << 20)
     if sha256:
         digest = hashlib.sha256(Path(dest).read_bytes()).hexdigest()

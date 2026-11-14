@@ -13,6 +13,15 @@
 # Monado's xcde.ini keeps being used while there is no monado folder, so an update never loses saves or settings.
 set -eu
 appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# MONADO_APPIMAGE_CA_BUNDLE: OpenSSL is bundled from the build runner (Ubuntu), whose default
+# CA path is /usr/lib/ssl. Arch/SteamOS use /etc/ssl and Fedora /etc/pki/tls, so point it at
+# the host's bundle; otherwise TLS checks fail with "unable to get local issuer certificate"
+# (the FSR 4 Lite preparation downloads AMD's upscaler DLL over HTTPS).
+if [ -z "${SSL_CERT_FILE:-}" ]; then
+  for c in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem /etc/ssl/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem; do
+    if [ -f "$c" ]; then export SSL_CERT_FILE="$c"; break; fi
+  done
+fi
 export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # FSR 4 Lite's model files: packaged (a local build with --fsr4-assets), else the data folder's fsr4/, which the
 # launcher's "Prepare FSR 4 Lite" fills on this PC (runtime/nvn/vulkan/fsr4.c looks there by itself)
