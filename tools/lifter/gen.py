@@ -676,7 +676,7 @@ def main(argv=None):
         f.write('// emitted by gen.py: keep in sync with the *_id.c next to this (NSO build-id check)\n')
         f.write(f'#define XCDE_GAME_{args.name.upper()}_ID "{m.nso.build_id}"\n')
         write_if_changed(os.path.join(args.outdir, f'{args.name}_id.h'), f.getvalue())
-    print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr)
+    print(f'{args.name}: wrote {nchunks} chunks, {time.time() - t0:.0f}s total', file=sys.stderr, flush=True)
 
 
 if __name__ == '__main__':
