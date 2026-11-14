@@ -80,13 +80,13 @@ def run_tool(command, env, log, what, timeout, stream=False):
     return result
 
 
-def describe_compiler(resources, link, log):
+def describe_compiler(resources, out, link, log):
     """The compiler's version and settings (its cache folder above all) at the top of the log."""
     compiler = resources / link['compiler']
-    env = compiler_env(resources, link)
+    env = compiler_env(resources, out, link)
     note(log, f'platform {sys.platform}, {os.cpu_count()} CPUs, compiler {compiler}')
-    note(log, f'ZIG_LIB_DIR={(env or {}).get("ZIG_LIB_DIR", "(unset)")} '
-              f'ZIG_GLOBAL_CACHE_DIR={os.environ.get("ZIG_GLOBAL_CACHE_DIR", "(default)")}')
+    note(log, f'ZIG_LIB_DIR={env.get("ZIG_LIB_DIR", "(unset)")} ZIG_GLOBAL_CACHE_DIR={env["ZIG_GLOBAL_CACHE_DIR"]} '
+              f'link: {"prebuilt C runtime" if link.get("lld") else "zig cc"}')
     for args in (['version'], ['env']):
         try:
             result = run_tool([str(compiler)] + args, env, log, f'zig {args[0]}', 120)
@@ -150,6 +150,10 @@ def fingerprint(dump, resources, link):
         if path.is_file():
             h.update(path.name.encode())
             h.update(str(path.stat().st_size).encode())
+    crt = resources / 'crt'
+    if crt.is_dir():
+        for path in sorted(crt.iterdir()):
+            h.update(f'{path.name} {path.stat().st_size}\n'.encode())
     return h.hexdigest()
 
 
@@ -195,11 +199,13 @@ def generate_modules(dump, resources, out, jobs, log):
     return modules
 
 
-def compiler_env(resources, link):
+def compiler_env(resources, out, link):
     """The bundled zig finds its trimmed lib/ folder here (the binary alone would not)."""
-    if not link.get('lib_dir'):
-        return None
-    return dict(os.environ, ZIG_LIB_DIR=str(resources / link['lib_dir']))
+    cache = str(out / 'zig-cache')
+    env = dict(os.environ, ZIG_GLOBAL_CACHE_DIR=cache, ZIG_LOCAL_CACHE_DIR=cache)
+    if link.get('lib_dir'):
+        env['ZIG_LIB_DIR'] = str(resources / link['lib_dir'])
+    return env
 
 
 def compile_units(resources, out, link, jobs, log):
@@ -232,7 +238,7 @@ def compile_units(resources, out, link, jobs, log):
             return key, signature, target
         command = ([str(compiler)] + list(link.get('compile', ['cc'])) + list(link.get('guest_flags', [])) +
                    [f'-I{item}' for item in include] + ['-c', str(source), '-o', str(target)])
-        result = run_tool(command, compiler_env(resources, link), log, f'compile {key}', COMPILE_TIMEOUT)
+        result = run_tool(command, compiler_env(resources, out, link), log, f'compile {key}', COMPILE_TIMEOUT)
         if result.returncode != 0:
             failures.append(f'{key}:\n{result.stdout}{result.stderr}')
         done[0] += 1
@@ -256,16 +262,29 @@ def link_library(resources, out, link, units, log):
         f'-I{resources / item}' for item in link.get('include', ['include'])] + [
         '-DGAMELIB_ID="{}"'.format((resources / 'gamelib-id.txt').read_text(encoding='utf-8').strip()),
         '-c', str(resources / 'entry/gamelib_entry.c'), '-o', str(entry)]
-    result = run_tool(command, compiler_env(resources, link), log, 'compile the entry point', COMPILE_TIMEOUT)
+    env = compiler_env(resources, out, link)
+    result = run_tool(command, env, log, 'compile the entry point', COMPILE_TIMEOUT)
     if result.returncode != 0:
         log.write(result.stdout + result.stderr)
         log.flush()
         raise SystemExit('gamebuild: linking the entry point failed')
     library = out / os.path.basename(link['library'])
-    command = ([str(compiler)] + list(link.get('link', ['cc', '-shared'])) + [str(entry)] +
-               [str(target) for _, _, target in units] +
-               [str(resources / extra) for extra in link.get('link_files', [])] + ['-v', '-o', str(library)])
-    result = run_tool(command, compiler_env(resources, link), log, 'link', LINK_TIMEOUT, stream=True)
+    inputs = ([str(entry)] + [str(target) for _, _, target in units] +
+              [str(resources / extra) for extra in link.get('link_files', [])])
+    if link.get('lld'):
+        args = []
+        for arg in link['lld']:
+            if arg == '{inputs}':
+                args += inputs
+            else:
+                args.append(arg.replace('{crt}', str(resources / 'crt')).replace('{dir}', str(out))
+                            .replace('{entry}', entry.stem).replace('{name}', library.stem))
+        response = out / 'link.rsp'
+        response.write_text(''.join(f'"{arg}"\n' for arg in args), encoding='utf-8')
+        command = [str(compiler), 'lld-link', f'@{response}']
+    else:
+        command = [str(compiler)] + list(link.get('link', ['cc', '-shared'])) + inputs + ['-v', '-o', str(library)]
+    result = run_tool(command, env, log, 'link', LINK_TIMEOUT, stream=True)
     if result.returncode != 0:
         raise SystemExit('gamebuild: linking the game code library failed')
     # What the runtime reads before loading it (runtime/gamelib.c), and the launcher's own record.
@@ -311,7 +330,7 @@ def main(argv=None):
     with (out / 'gamebuild.log').open('w', encoding='utf-8', errors='replace') as log:
         log.write(f'gamebuild: {dump} -> {out}\n')
         log.flush()
-        describe_compiler(resources, link, log)
+        describe_compiler(resources, out, link, log)
         note(log, 'generate: start')
         modules = generate_modules(dump, resources, out, jobs, log)
         note(log, f'generate: done; compile: start ({jobs} at a time)')

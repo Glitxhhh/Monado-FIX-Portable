@@ -12,7 +12,9 @@ import argparse
 import json
 import os
 import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +37,50 @@ LIBC_HEADERS = {'linux': ('any-linux-any', 'generic-glibc', 'x86-linux-any', 'x8
 # An explicit target: the bundled headers and libraries, never the player's system ones (and the same objects on
 # every PC; the CPU level comes from GUEST_FLAGS' -march).
 TARGET = {'linux': 'x86_64-linux-gnu', 'windows': 'x86_64-windows-gnu'}
+PROBE = 'gamelib_probe'
+PROBE_INPUT = 'gamelib_probe_input'
+
+
+def prelink(dest, platform):
+    zig =dest / 'compiler' / 'zig.exe'
+    crt = dest / 'crt'
+    crt.mkdir()
+    with tempfile.TemporaryDirectory(prefix='monado-prelink-') as temp:
+        work = Path(temp)
+        cache = work / 'cache'
+        env = dict(os.environ, ZIG_LIB_DIR=str(dest / 'compiler' / 'lib'),
+                   ZIG_GLOBAL_CACHE_DIR=str(cache), ZIG_LOCAL_CACHE_DIR=str(cache))
+        (work / 'obj').mkdir()
+        source, obj = work / f'{PROBE_INPUT}.c', work / 'obj' / f'{PROBE_INPUT}.o'
+        source.write_text(f'int {PROBE}(void) {{ return 0; }}\n', encoding='utf-8')
+        subprocess.run([str(zig), 'cc', '-target', TARGET[platform], *game_id.GUEST_FLAGS, '-c', str(source),
+                        '-o', str(obj)], env=env, check=True)
+        result = subprocess.run([str(zig), 'cc', '-target', TARGET[platform], '-shared', str(obj), '-v',
+                                 '-o', str(work / f'{PROBE}.dll')], env=env, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(f'gamebuild: the probe link failed:\n{result.stdout}{result.stderr}')
+        line = next((l for l in (result.stdout + result.stderr).splitlines() if l.startswith('lld-link ')), None)
+        if line is None:
+            raise SystemExit('gamebuild: zig printed no lld-link command for the probe link')
+        tokens = line.replace(str(cache), '\0cache').replace(str(work), '\0work').split(' ')[1:]
+        args = []
+        for token in tokens:
+            if token.startswith('\0cache'):
+                path = Path(str(cache) + token[len('\0cache'):])
+                if (crt / path.name).exists():
+                    raise SystemExit(f'gamebuild: two runtime files named {path.name}')
+                shutil.copy2(path, crt / path.name)
+                args.append('{crt}/' + path.name)
+            elif token == f'\0work{os.sep}obj{os.sep}{PROBE_INPUT}.o':
+                args.append('{inputs}')
+            else:
+                arg = token.replace('\0work', '{dir}').replace(PROBE_INPUT, '{entry}').replace(PROBE, '{name}')
+                if '\0' in arg:
+                    raise SystemExit(f'gamebuild: unexpected path in the probe link: {token}')
+                args.append(arg)
+        if args.count('{inputs}') != 1:
+            raise SystemExit('gamebuild: the probe link command has no input object')
+    return args
 
 
 def find_zig():
@@ -114,6 +160,8 @@ def stage(dest, platform, zig=None, link_files=()):
         # executable is linked, after this staging step, so only the packager checks it.
         'link_files': list(link_files),
     }
+    if platform == 'windows':
+        link['lld'] = prelink(dest, platform)
     (dest / 'link.json').write_text(json.dumps(link, indent=2) + '\n', encoding='utf-8')
     return dest
 
