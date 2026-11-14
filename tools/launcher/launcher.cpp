@@ -958,6 +958,7 @@ static void pc_poll() {
 // reports ready.
 #ifdef _WIN32
 static HANDLE g_gc_proc;
+static HANDLE g_gc_job;
 #define GC_LIB "lasgame.dll"
 #define GC_TOOL "monado-gamebuild.exe"
 #else
@@ -1027,12 +1028,30 @@ static bool gc_start(bool then_play) {
     }
     std::vector<char> buf(cmd.begin(), cmd.end());
     buf.push_back(0);
-    BOOL ok = CreateProcessA(tool.c_str(), buf.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS, NULL,
+    HANDLE job = CreateJobObjectA(NULL, NULL);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+    }
+    BOOL ok = CreateProcessA(tool.c_str(), buf.data(), NULL, NULL, TRUE,
+                             CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS | CREATE_SUSPENDED, NULL,
                              g_root.c_str(), &si, &pi2);
+    DWORD err = GetLastError();
     if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-    if (!ok) { g_status = std::string(g.ui_lang ? "Could not start the game code build (error " : "No se pudo preparar el código del juego (error ") + std::to_string(GetLastError()) + ")"; return false; }
+    if (!ok) {
+        if (job) CloseHandle(job);
+        g_status = std::string(g.ui_lang ? "Could not start the game code build (error " : "No se pudo preparar el código del juego (error ") + std::to_string(err) + ")";
+        return false;
+    }
+    if (job && !AssignProcessToJobObject(job, pi2.hProcess)) {
+        CloseHandle(job);
+        job = NULL;
+    }
+    ResumeThread(pi2.hThread);
     CloseHandle(pi2.hThread);
     g_gc_proc = pi2.hProcess;
+    g_gc_job = job;
 #else
     pid_t pid = spawn_logged({tool, "--root", root, "--out", out, "--resources", gc_dir()}, log, true);
     if (!pid) { g_status = std::string(g.ui_lang ? "Could not start the game code build (" : "No se pudo preparar el código del juego (") + strerror(errno) + ")"; return false; }
@@ -1048,10 +1067,13 @@ static bool gc_start(bool then_play) {
 static void gc_stop() {  // (closing the launcher: the builder keeps what it compiled and continues next time)
     if (!gc_running()) return;
 #ifdef _WIN32
-    TerminateProcess(g_gc_proc, 1);
+    if (g_gc_job) TerminateJobObject(g_gc_job, 1);
+    else TerminateProcess(g_gc_proc, 1);
     WaitForSingleObject(g_gc_proc, 2000);
     CloseHandle(g_gc_proc);
     g_gc_proc = NULL;
+    if (g_gc_job) CloseHandle(g_gc_job);
+    g_gc_job = NULL;
 #else
     kill(-g_gc_proc, SIGTERM);
     bool ended = false;
@@ -1087,6 +1109,8 @@ static void gc_poll() {
     GetExitCodeProcess(g_gc_proc, &code);
     CloseHandle(g_gc_proc);
     g_gc_proc = NULL;
+    if (g_gc_job) CloseHandle(g_gc_job);
+    g_gc_job = NULL;
 #else
     int st = 0;
     if (waitpid(g_gc_proc, &st, WNOHANG) != g_gc_proc) return;

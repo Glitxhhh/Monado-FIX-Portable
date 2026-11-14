@@ -1,4 +1,4 @@
-"""Freeze the first-start builder into a single executable for release packages.
+"""Freeze the first-start builder into an executable and its _internal/ folder for release packages.
 
 PyInstaller is only needed on the build machine (pip install pyinstaller); players
 run the frozen binary. The result is `build/gamebuild/monado-gamebuild[.exe]`, which
@@ -53,8 +53,9 @@ def main(argv=None):
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     work = ROOT / 'build/pyinstaller'
-    command = [args.python, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onefile', '--name', NAME,
-               '--distpath', str(output), '--workpath', str(work), '--specpath', str(work),
+    dist = work / 'dist'
+    command = [args.python, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', NAME,
+               '--distpath', str(dist), '--workpath', str(work), '--specpath', str(work),
                '--paths', str(ROOT / 'tools/lifter'), '--paths', str(ROOT / 'tools/extract')]
     for module in HIDDEN:
         command += ['--hidden-import', module]
@@ -67,6 +68,13 @@ def main(argv=None):
         raise SystemExit('freeze: PyInstaller is not installed for this interpreter (pip install pyinstaller)')
     except subprocess.CalledProcessError as error:
         raise SystemExit(f'freeze: PyInstaller failed ({error.returncode})')
+    bundle = dist / NAME
+    shutil.rmtree(output / '_internal', ignore_errors=True)
+    for item in bundle.iterdir():
+        if item.is_dir():
+            shutil.copytree(item, output / item.name)
+        else:
+            shutil.copy2(item, output / item.name)
     binary = output / (NAME + ('.exe' if os.name == 'nt' else ''))
     if not binary.is_file():
         raise SystemExit(f'freeze: PyInstaller did not produce {binary}')
