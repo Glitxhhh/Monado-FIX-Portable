@@ -7,7 +7,10 @@
 #   ./Monado-x86_64.AppImage [dump directory]       launcher
 #   ./Monado-x86_64.AppImage --play [dump directory] the game directly
 # The dump: the argument, else MONADO_GAME_ROOT, else targets/ next to the AppImage, else the one linked last time.
-# The data folder: MONADO_DATA_ROOT, else $XDG_DATA_HOME/lasrecomp (~/.local/share/lasrecomp, as runtime/paths.c).
+# The data folder (GitHub #88): MONADO_DATA_ROOT, else a monado-data folder next to the AppImage when there is one
+# (portable: everything stays beside it), else $XDG_DATA_HOME/monado (~/.local/share/monado, as runtime/platform/linux.c).
+# Before, it was $XDG_DATA_HOME/lasrecomp, the folder LASRecomp's Link's Awakening recomp uses too: one that holds
+# Monado's xcde.ini keeps being used while there is no monado folder, so an update never loses saves or settings.
 set -eu
 appdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export LD_LIBRARY_PATH="$appdir/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -35,8 +38,13 @@ if [ "$#" -gt 0 ]; then shift; fi
 if [ -z "$root" ] && [ -n "${APPIMAGE:-}" ] && [ -d "$(dirname -- "$APPIMAGE")/targets" ]; then root="$(dirname -- "$APPIMAGE")/targets"; fi
 case "$root" in ""|/*) ;; *) root="$PWD/$root";; esac
 data=${MONADO_DATA_ROOT:-}
+if [ -z "$data" ] && [ -n "${APPIMAGE:-}" ] && [ -d "$(dirname -- "$APPIMAGE")/monado-data" ]; then
+  data="$(dirname -- "$APPIMAGE")/monado-data"
+fi
 if [ -z "$data" ]; then
-  case "${XDG_DATA_HOME:-}" in /*) data="$XDG_DATA_HOME/lasrecomp";; *) data="${HOME:?HOME must be set}/.local/share/lasrecomp";; esac
+  case "${XDG_DATA_HOME:-}" in /*) base="$XDG_DATA_HOME";; *) base="${HOME:?HOME must be set}/.local/share";; esac
+  data="$base/monado"
+  if [ ! -e "$data" ] && [ -f "$base/lasrecomp/xcde.ini" ]; then data="$base/lasrecomp"; fi
 fi
 mkdir -p -- "$data/build/linux"
 data=$(CDPATH= cd -- "$data" && pwd)

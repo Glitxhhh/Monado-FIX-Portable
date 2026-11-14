@@ -35,7 +35,7 @@ The launcher alone: `tools/launcher/build_linux.sh`. Its reports are zipped with
 - DLSS (NVIDIA Streamline) is Windows-only. FSR 3.1 and FSR 4 Lite are native Linux components (below).
   Everything else (FSR 1, SMAA, the F1 menu, mods, controls) is the same code.
 - Logs go to the terminal or wherever stderr is redirected (the launcher: `build/last_game.log`); started from a
-  desktop without either, to `~/.local/share/lasrecomp/lasrecomp.log`.
+  desktop without either, to `~/.local/share/monado/lasrecomp.log`.
 - The watchdog (`XCDE_STALL`, `XCDE_WATCHDOG`) samples one PC per guest thread instead of a full host stack.
 
 ## Native temporal upscalers (optional)
@@ -69,7 +69,9 @@ The AppImage contains the game code recompiled from **your** dump, so it is for 
 (CONTRIBUTING.md, art. I). It bundles the launcher, the native FSR components when they were built (with their
 sources and licences) and the non-system libraries; GPU drivers, the Vulkan loader and glibc come from the host
 (build on the oldest distribution you want to run it on). Its mount is read-only, so `xcde.ini`, `cache/`, saves
-and logs live in `~/.local/share/lasrecomp` (or `MONADO_DATA_ROOT`), which gets a `targets` link to the dump and a
+and logs live in `~/.local/share/monado` (or `MONADO_DATA_ROOT`, or a `monado-data` folder you create next to the
+AppImage to keep everything beside it; a `~/.local/share/lasrecomp` folder from older versions that holds `xcde.ini`
+keeps being used), which gets a `targets` link to the dump and a
 `build/linux/monado` link to the packaged game: the launcher and the game use the same layout as a checkout.
 The dump: the argument, `MONADO_GAME_ROOT`, a `targets/` folder next to the AppImage, the one chosen with the
 launcher's **Select game dump** button (also in a checkout: it links `targets/` there), or the one used last time.
