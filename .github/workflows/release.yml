@@ -7,6 +7,10 @@
 # both packages attached: review it on the Releases page and publish it yourself.
 # Manual run + a tag name in the "tag" box = a DRAFT release is created too.
 #
+# Package names carry the version being released: Monado-<version>-x86_64.AppImage and
+# Monado-Windows-x64-<version>.zip. The version comes from the v* tag (v1.2.3 -> 1.2.3) or from the manual "tag"
+# input; a manual run without a tag uses 0.0.0-dev.<run>-<sha> so test packages still have unique names.
+#
 # Upscalers: FSR 1 always; FSR 3 (Linux: native component built from AMD's SDK source; Windows: AMD's signed DLL from
 # the official FidelityFX SDK 1.1.4 release); DLSS on Windows (NVIDIA's official Streamline release,
 # tools/install_dlss.py, hash-pinned); FSR 4 Lite on both. FSR 4 Lite's model files are NOT packaged (they are
@@ -33,7 +37,44 @@ env:
   FFX_SHA256: 0216556bfb0e243cec30004a2a98d38f4e3f7406cb7938e3c1b85c758e95d952   # (AMD publishes no digest: measured once)
 
 jobs:
+  version:
+    # One place decides the package-name suffix, so Linux and Windows cannot drift apart.
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - name: Resolve the package version
+        id: resolve
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ inputs.tag }}
+          SHA: ${{ github.sha }}
+          RUN: ${{ github.run_number }}
+        run: |
+          if [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            ref="$REF_NAME"
+          else
+            ref="$TAG_INPUT"
+          fi
+          version="${ref#v}"
+          if [ -z "$version" ]; then
+            version="0.0.0-dev.${RUN}-${SHA:0:7}"
+          fi
+          # keep only filename-safe characters: letters, digits, dot, underscore, dash
+          version=$(printf '%s' "$version" | tr -c 'A-Za-z0-9._-' '-')
+          version=$(printf '%s' "$version" | sed -e 's/^-\+//' -e 's/-\+$//')
+          if [ -z "$version" ]; then
+            echo "::error::could not derive a filename-safe version from '$ref'"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Package version: $version"
+
   linux:
+    needs: version
     runs-on: ubuntu-24.04   # (glibc 2.39: the AppImage then runs on current and older distributions alike)
     timeout-minutes: 60
     steps:
@@ -89,22 +130,53 @@ jobs:
         run: .venv/bin/python tools/freeze_gamebuild.py --python .venv/bin/python
       - name: FSR 4 Lite preparation tool
         run: .venv/bin/python tools/build_fsr4prep.py
+      - name: Point the bundled OpenSSL at the host's CA store
+        # monado-fsr4prep is frozen here with the runner's OpenSSL (Ubuntu), which is compiled with
+        # OPENSSLDIR=/usr/lib/ssl. Arch/SteamOS keep their store in /etc/ssl and Fedora in /etc/pki/tls,
+        # so on those hosts the trust store is empty and the FSR 4 Lite download fails with
+        # "certificate verify failed: unable to get local issuer certificate". The launcher hands its
+        # environment to the preparation tool, so exporting SSL_CERT_FILE in AppRun fixes every host.
+        run: |
+          apprun=packaging/linux/AppRun
+          test -f "$apprun" || { echo "::error::$apprun is missing"; exit 1; }
+          if grep -q 'MONADO_APPIMAGE_CA_BUNDLE' "$apprun"; then
+            echo "AppRun already contains the CA bundle block"
+          else
+            cat > /tmp/monado-ca-bundle.sh <<'EOF'
+          # MONADO_APPIMAGE_CA_BUNDLE: OpenSSL is bundled from the build runner (Ubuntu), whose default
+          # CA path is /usr/lib/ssl. Arch/SteamOS use /etc/ssl and Fedora /etc/pki/tls, so point it at
+          # the host's bundle; otherwise TLS checks fail with "unable to get local issuer certificate"
+          # (the FSR 4 Lite preparation downloads AMD's upscaler DLL over HTTPS).
+          if [ -z "${SSL_CERT_FILE:-}" ]; then
+            for c in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem /etc/ssl/certs/ca-bundle.crt /etc/ssl/ca-bundle.pem; do
+              if [ -f "$c" ]; then export SSL_CERT_FILE="$c"; break; fi
+            done
+          fi
+          EOF
+            sed -i '/^appdir=/r /tmp/monado-ca-bundle.sh' "$apprun"
+            grep -q 'MONADO_APPIMAGE_CA_BUNDLE' "$apprun" || { echo "::error::could not patch $apprun (no appdir= line?)"; exit 1; }
+          fi
+          grep -n -A6 'MONADO_APPIMAGE_CA_BUNDLE' "$apprun"
       - name: appimagetool (pinned)
         run: |
           curl -fsSL -o /tmp/appimagetool "$APPIMAGETOOL_URL"
           echo "$APPIMAGETOOL_SHA256  /tmp/appimagetool" | sha256sum -c -
           chmod +x /tmp/appimagetool
       - name: Package the AppImage (checked with tools/package_guard.py)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          python3 tools/make_appimage.py --release --appimagetool /tmp/appimagetool --output dist/Monado-x86_64.AppImage
-          (cd dist && sha256sum Monado-x86_64.AppImage > Monado-x86_64.AppImage.sha256)
+          img="Monado-${VERSION}-x86_64.AppImage"
+          python3 tools/make_appimage.py --release --appimagetool /tmp/appimagetool --output "dist/$img"
+          (cd dist && sha256sum "$img" > "$img.sha256")
       - uses: actions/upload-artifact@v4
         with:
-          name: monado-linux
+          name: monado-linux-${{ needs.version.outputs.version }}
           path: dist/
           if-no-files-found: error
 
   windows:
+    needs: version
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -159,15 +231,18 @@ jobs:
           $env:PATH = "$PWD\.venv\Scripts;C:\msys64\ucrt64\bin;$env:PATH"
           .venv\Scripts\python tools/build_fsr4prep.py
       - name: Package the ZIP (checked with tools/package_guard.py)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           .venv\Scripts\python tools/make_portable.py "$env:RUNNER_TEMP\Monado-Windows" --release --msys C:\msys64\ucrt64\bin
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "$env:RUNNER_TEMP\Monado-Windows\*" -DestinationPath dist/Monado-Windows-x64.zip
-          (Get-FileHash dist/Monado-Windows-x64.zip -Algorithm SHA256).Hash.ToLower() + "  Monado-Windows-x64.zip" |
-            Out-File -Encoding ascii dist/Monado-Windows-x64.zip.sha256
+          $zip = "Monado-Windows-x64-$env:VERSION.zip"
+          Compress-Archive -Path "$env:RUNNER_TEMP\Monado-Windows\*" -DestinationPath "dist/$zip"
+          (Get-FileHash "dist/$zip" -Algorithm SHA256).Hash.ToLower() + "  $zip" |
+            Out-File -Encoding ascii "dist/$zip.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: monado-windows
+          name: monado-windows-${{ needs.version.outputs.version }}
           path: dist/
           if-no-files-found: error
 
